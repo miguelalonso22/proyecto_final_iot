@@ -29,38 +29,6 @@ void replace_plus_with_space(char *str) {
     }
 }
 
-// Función para extraer el delimitador de la cabecera Content-Type
-static const char* get_boundary_from_content_type(const char* content_type) {
-    const char* boundary_prefix = "boundary=";
-    const char* found = strstr(content_type, boundary_prefix);
-    if (found) {
-        return found + strlen(boundary_prefix);
-    }
-    return NULL;
-}
-
-// Función para parsear datos multipart/form-data
-void parse_multipart_form_data(const char* content, const char* boundary) {
-    char delim[128] = "--";
-    strcat(delim, boundary);  // Preparar el delimitador completo con '--' prefijado
-    strcat(delim, "\r\n");
-
-    const char* start_part = strstr(content, delim);
-    while (start_part) {
-        start_part += strlen(delim);
-        const char* end_part = strstr(start_part, "\r\n--");
-        if (!end_part) break;
-
-        // Aquí puedes procesar la parte desde start_part hasta end_part
-        // Por simplicidad, solo imprimiremos la parte
-        char part_content[1024] = {0};
-        strncpy(part_content, start_part, end_part - start_part);
-        printf("Part: %s\n", part_content);
-
-        start_part = strstr(end_part, delim);
-    }
-}
-
 // ----- FIN SECCIÓN UTILIDADES -----
 
 
@@ -77,49 +45,45 @@ void parse_multipart_form_data(const char* content, const char* boundary) {
     "body { font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; }"
     "</style>"
     "<script>"
-    "document.addEventListener('DOMContentLoaded', function() {"
-    "    document.getElementById(\"myForm\").addEventListener('submit', function(event) {"
-    "        event.preventDefault();"
-    "        var formData = new URLSearchParams();"
-    "        for (const pair of new FormData(this)) {"
-    "            formData.append(pair[0], pair[1]);"
-    "        }"
-    "        fetch('/echo', {"
-    "            method: 'POST',"
-    "            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },"
-    "            body: formData.toString()"
-    "        })"
-    "        .then(response => response.text())"
-    "        .then(data => { document.getElementById('responseContainer').innerHTML = data; })"
-    "        .catch(error => console.error('Error:', error));"
-    "    });"
-    "});"
+    "function submitForm(event, formId, endpoint) {"
+            "event.preventDefault();"
+            "var formData = new URLSearchParams();"
+            "for (const pair of new FormData(document.getElementById(formId))) {"
+                "formData.append(pair[0], pair[1]);"
+            "}"
+            "fetch(endpoint, {"
+                "method: 'POST',"
+                "headers: { 'Content-Type': 'application/x-www-form-urlencoded' },"
+                "body: formData.toString()"
+            "})"
+            ".then(response => response.text())"
+            ".then(data => { document.getElementById(formId + 'Response').innerHTML = data; })"
+            ".catch(error => console.error('Error:', error));"
+        "}"
     "</script>"
 
     "</head>"
     "<body>"
     "<div>"
-        "<h1>Bienvenido!</h1>" "<h2>Al Laboratorio 2b de Miguel Alonso, Agustina Roballo y Diego Durán </h2>"
-            "<form id=\"myForm\">"
-            "<b>Configuraciones de Red</b>"
+        "<h1>Bienvenido!</h1>" "<h2>Al Proyecto Final IOT de Miguel Alonso, Agustina Roballo y Diego Durán </h2>"
+        "<h3>Configuraciones de Red</h3>"
+        "<form id=\"formRed\" onsubmit=\"submitForm(event, 'formRed', '/redConfig')\">"
+            "SSID: <input type=\"text\" name=\"ssid\" placeholder='SSID' maxlength='100'>" 
+            "Password: <input type=\"text\" name=\"password\" placeholder='Contraseña' maxlength='100'>"
             "<div>"
-            "<input type=\"text\" name=\"ssid\" placeholder='SSID' maxlength='100'>" 
-            "<input type=\"text\" name=\"password\" placeholder='Contraseña' maxlength='100'>"
+                "<input type=\"submit\" value=\"Actualizar Red\">"
             "</div>"
-            "<b>Configuraciones MQTT</b>"
-            "<div>"
+        "</form>"
+        "<div id=\"formRedResponse\"></div>"
+        "<h3>Configuraciones MQTT</h3>"
+        "<form id=\"formMQTT\" onsubmit=\"submitForm(event, 'formMQTT', '/mqttConfig')\">"
             "<input type=\"text\" name=\"broker\" placeholder='Broker.address.uri' maxlength='100'>"
             "<input type=\"text\" name=\"topic\" placeholder='Topic' maxlength='100'>"
-            "</div>"
             "<div>"
-            "<textarea name=\"message\" placeholder='Mensaje de prueba...' maxlength='100'></textarea>"
+                "<input type=\"submit\" value=\"Actualizar Broker\">"
             "</div>"
-            "<div>"
-                "<input type=\"submit\" value=\"Enviar\">"
-            "</div>"
-    // Aquí añadí el contenedor para la respuesta
-            "<div id='responseContainer'> </div>"        
-            "</form>"
+        "</form>"
+        "<div id=\"formMQTTResponse\"></div>"
     "</div>"
     "</body>"
     "</html>";
@@ -141,6 +105,7 @@ static esp_err_t update_wifi_sta(const char* ssid, const char* pass) {
     // Desconectar y detener WiFi antes de reconfigurar
     esp_wifi_disconnect();
     esp_wifi_stop();
+    vTaskDelay(pdMS_TO_TICKS(100)); // Pequeña pausa para asegurar que el WiFi se detiene completamente
 
     wifi_config_t sta_config = {};
     strncpy((char*)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid));
@@ -171,7 +136,7 @@ static esp_err_t update_wifi_sta(const char* ssid, const char* pass) {
     return ESP_OK;
 }
 
-esp_err_t echo_post_handler(httpd_req_t *req) {
+esp_err_t red_post_handler(httpd_req_t *req) {
     char buf[256] = {0};
     int ret, remaining = req->content_len;
 
@@ -197,33 +162,81 @@ esp_err_t echo_post_handler(httpd_req_t *req) {
     printf("Datos recibidos (crudos): %s\n", buf);
 
     // Extraer y decodificar cada campo
-    char ssid[100], password[100], broker[100], topic[100], message[100];
+    char ssid[100], password[100];
 
     httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid));
     httpd_query_key_value(buf, "password", password, sizeof(password));
-    httpd_query_key_value(buf, "broker", broker, sizeof(broker));
-    httpd_query_key_value(buf, "topic", topic, sizeof(topic));
-    httpd_query_key_value(buf, "message", message, sizeof(message));
 
     // Reemplazar '+' con espacios
     replace_plus_with_space(ssid);
     replace_plus_with_space(password);
-    replace_plus_with_space(broker);
-    replace_plus_with_space(topic);
-    replace_plus_with_space(message);
 
-    printf("Red: %s, Password: %s, Broker: %s, Topic: %s, Mensaje: %s\n", ssid, password, broker, topic, message);
+    printf("Red: %s, Password: %s\n", ssid, password);
 
-    httpd_resp_send(req, "Datos recibidos", HTTPD_RESP_USE_STRLEN);
+    // Verificar conexión actual
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK && strcmp((char *)ap_info.ssid, ssid) == 0) {
+        httpd_resp_send(req, "Ya conectado a la red deseada", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    httpd_resp_send(req, ssid, strlen(ssid));  // Enviar SSID como respuesta
     
   // Configurar WiFi STA con los datos recibidos
     if (update_wifi_sta(ssid, password) != ESP_OK) {
         httpd_resp_send_500(req);
+        ESP_LOGE("WIFI", "Fallo la configuración de WiFi STA");
         return ESP_FAIL;
     }
+
+    ESP_LOGI("HTTP", "Conexión exitosa: %s", ssid);
     return ESP_OK;
 }
 
+
+esp_err_t mqtt_post_handler(httpd_req_t *req) {
+char buf[256] = {0};
+    int ret, remaining = req->content_len;
+
+    if (remaining > 0) {
+        printf("Esperando recibir %d bytes\n", remaining);
+    } else {
+        printf("No hay datos para recibir.\n");
+    }
+
+    while (remaining > 0) {
+        ret = httpd_req_recv(req, buf, MIN(remaining, sizeof(buf) - 1));
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            httpd_resp_send_500(req);
+            printf("Error recibiendo datos: %d\n", ret);
+            return ESP_FAIL;
+        }
+        buf[ret] = '\0';
+        remaining -= ret;
+    }
+    printf("Datos recibidos (crudos): %s\n", buf);
+
+    // Extraer y decodificar cada campo
+    char broker[100], topic[100];
+
+    httpd_query_key_value(buf, "broker", broker, sizeof(broker));
+    httpd_query_key_value(buf, "topic", topic, sizeof(topic));
+
+    // Reemplazar '+' con espacios
+    replace_plus_with_space(broker);
+    replace_plus_with_space(topic);
+
+    printf("Broker: %s, Topic: %s\n", broker, topic);
+
+    httpd_resp_send(req, "Datos recibidos", HTTPD_RESP_USE_STRLEN);
+    
+  // Configurar broker con los datos recibidos
+    return ESP_OK;
+
+}
 // ENDPOINTS
 httpd_uri_t home = {
     .uri       = "/",
@@ -232,13 +245,19 @@ httpd_uri_t home = {
     .user_ctx  = NULL
 };
 
-httpd_uri_t echo = {
-    .uri       = "/echo",
+httpd_uri_t redConfig = {
+    .uri       = "/redConfig",
     .method    = HTTP_POST,
-    .handler   = echo_post_handler,
+    .handler   = red_post_handler,
     .user_ctx  = NULL
 };
 
+httpd_uri_t mqttConfig = {
+    .uri       = "/mqttConfig",
+    .method    = HTTP_POST,
+    .handler   = mqtt_post_handler,
+    .user_ctx  = NULL
+};
 // ----- FIN SECCIÓN SERVER -----
 
 // ----- INICIO SECCIÓN WIFI -----
@@ -256,7 +275,7 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
 
         case WIFI_EVENT_STA_DISCONNECTED:
             if(s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
-                vTaskDelay(pdMS_TO_TICKS(2000)); // Esperar 2 segundos antes de reconectar
+                vTaskDelay(pdMS_TO_TICKS(2000)); 
                 esp_wifi_connect(); // Reintentar conectar automáticamente
                 printf("Disconnected. Trying to reconnect...\n");
                 s_retry_num++;
@@ -267,10 +286,9 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
             break;
 
         case IP_EVENT_STA_GOT_IP:
-            ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-            printf("Got IP: %d.%d.%d.%d\n",
-                   IP2STR(&event->ip_info.ip));
 
+            ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+            printf("Got IP: %d.%d.%d.%d\n", IP2STR(&event->ip_info.ip));
             s_retry_num = 0;
             break;
 
@@ -318,8 +336,6 @@ void wifi_init(void)
         },
     };
 
-
-
     esp_wifi_set_mode(WIFI_MODE_APSTA);
     esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
     esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
@@ -347,12 +363,15 @@ void start_webserver(void)
     // Iniciar el servidor web
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_register_uri_handler(server, &home);
-        httpd_register_uri_handler(server, &echo);
+        httpd_register_uri_handler(server, &redConfig);
+        httpd_register_uri_handler(server, &mqttConfig);
     }
 }
 
 void app_main(void)
 {
+    wifi_connect_semaphore = xSemaphoreCreateBinary();
+
     wifi_init();
     start_webserver();
 }

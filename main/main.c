@@ -35,6 +35,8 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = -10800;  // UTC-3 en segundos
 const int   daylightOffset_sec = 0;  // No hay horario de verano
 
+bool synchronized = false;
+
 // ----- FIN SECCIÓN UTILIDADES -----
 
 
@@ -52,16 +54,13 @@ const int   daylightOffset_sec = 0;  // No hay horario de verano
     "</style>"
     "<script>"
     "function startTime() {"
-                     "  var today = new Date();"
-                     "  var h = today.getHours();"
-                     "  var m = today.getMinutes();"
-                     "  var s = today.getSeconds();"
-                     "  m = checkTime(m);"
-                     "  s = checkTime(s);"
-                     "  document.getElementById('timeContainer').innerHTML = h + ':' + m + ':' + s;"
-                     "  setTimeout(startTime, 1000);"
+                     "  fetch('/time')"
+                     "  .then(response => response.json())"
+                     "  .then(data => {document.getElementById('timeContainer').innerHTML = data.time;"
+                     "  setTimeout(startTime, 1000);})" // Actualiza la hora cada segundo
+                     "  .catch(error => console.log('Error:', error));"
                      "}"
-                     "function checkTime(i) {"
+                     "  function checkTime(i) {"
                      "  if (i < 10) {i = '0' + i};"
                      "  return i;"
                      "}"
@@ -114,6 +113,36 @@ const int   daylightOffset_sec = 0;  // No hay horario de verano
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html_code, strlen(html_code));
+    return ESP_OK;
+}
+
+esp_err_t time_handler(httpd_req_t *req)
+{ 
+    if(synchronized == false){
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    char strftime_buf[64];
+    time_t now;
+    struct tm timeinfo;
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+
+    char* resp_str = (char*)malloc(100);
+    if (!resp_str) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    // sprintf(resp_str, "{\"time\": \"%s\"}", strftime_buf);
+     snprintf(resp_str, 100, "{\"time\": \"%s\"}", strftime_buf);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+    // printf("Rquested time: %s", resp_str);
+
+    free(resp_str);
     return ESP_OK;
 }
 
@@ -280,6 +309,14 @@ httpd_uri_t mqttConfig = {
     .handler   = mqtt_post_handler,
     .user_ctx  = NULL
 };
+
+httpd_uri_t uri_time = {
+    .uri       = "/time",
+    .method    = HTTP_GET,
+    .handler   = time_handler,
+    .user_ctx  = NULL
+};
+
 // ----- FIN SECCIÓN SERVER -----
 
 // ----- INICIO SECCIÓN WIFI -----
@@ -387,23 +424,20 @@ void start_webserver(void)
         httpd_register_uri_handler(server, &home);
         httpd_register_uri_handler(server, &redConfig);
         httpd_register_uri_handler(server, &mqttConfig);
+        httpd_register_uri_handler(server, &uri_time);
     }
 }
 
+
 void app_main(void)
 {
-
     wifi_init();
-    // Configura la hora utilizando NTP
-    // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-    // Configura la hora utilizando NTP
+
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, ntpServer);
     esp_sntp_init();
 
-    // setenv("TZ", "UYT3UYST,M10.1.0,M3.2.0", 1);
     setenv("TZ", "<-03>3", 1);
-
     tzset();
 
     start_webserver();
@@ -417,15 +451,19 @@ void app_main(void)
         localtime_r(&now, &timeinfo);
 
         if (timeinfo.tm_year < (2024 - 1900)) {
+            synchronized = false;
             printf("Time is not set yet. Connecting to WiFi and getting time over NTP.\n");
             vTaskDelay(2000 / portTICK_PERIOD_MS);
             continue;
+        } else {
+            synchronized = true;
+            
         }
 
         strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
         printf("The current date/time in Montevideo is: %s\n", strftime_buf);
         vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
-
+ 
 
 }

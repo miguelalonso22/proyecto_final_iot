@@ -13,6 +13,8 @@
 
 #include "esp_vfs.h"
 #include "esp_http_server.h"
+#include "esp_sntp.h"
+#include "time.h"
 
 // ----- INICIO SECCIÓN UTILIDADES -----
 // Definición de la macro MIN
@@ -28,6 +30,10 @@ void replace_plus_with_space(char *str) {
         }
     }
 }
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = -10800;  // UTC-3 en segundos
+const int   daylightOffset_sec = 0;  // No hay horario de verano
 
 // ----- FIN SECCIÓN UTILIDADES -----
 
@@ -45,6 +51,20 @@ void replace_plus_with_space(char *str) {
     "body { font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; }"
     "</style>"
     "<script>"
+    "function startTime() {"
+                     "  var today = new Date();"
+                     "  var h = today.getHours();"
+                     "  var m = today.getMinutes();"
+                     "  var s = today.getSeconds();"
+                     "  m = checkTime(m);"
+                     "  s = checkTime(s);"
+                     "  document.getElementById('timeContainer').innerHTML = h + ':' + m + ':' + s;"
+                     "  setTimeout(startTime, 1000);"
+                     "}"
+                     "function checkTime(i) {"
+                     "  if (i < 10) {i = '0' + i};"
+                     "  return i;"
+                     "}"
     "function submitForm(event, formId, endpoint) {"
             "event.preventDefault();"
             "var formData = new URLSearchParams();"
@@ -63,7 +83,7 @@ void replace_plus_with_space(char *str) {
     "</script>"
 
     "</head>"
-    "<body>"
+    "<body onload='startTime()'>"
     "<div>"
         "<h1>Bienvenido!</h1>" "<h2>Al Proyecto Final IOT de Miguel Alonso, Agustina Roballo y Diego Durán </h2>"
         "<h3>Configuraciones de Red</h3>"
@@ -84,6 +104,8 @@ void replace_plus_with_space(char *str) {
             "</div>"
         "</form>"
         "<div id=\"formMQTTResponse\"></div>"
+        "<h3>Hora Actual</h3>"
+        "<div id=\"timeContainer\"></div>"
     "</div>"
     "</body>"
     "</html>";
@@ -370,8 +392,40 @@ void start_webserver(void)
 
 void app_main(void)
 {
-    wifi_connect_semaphore = xSemaphoreCreateBinary();
 
     wifi_init();
+    // Configura la hora utilizando NTP
+    // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    // Configura la hora utilizando NTP
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, ntpServer);
+    esp_sntp_init();
+
+    // setenv("TZ", "UYT3UYST,M10.1.0,M3.2.0", 1);
+    setenv("TZ", "<-03>3", 1);
+
+    tzset();
+
     start_webserver();
+    // Create a loop that prints the time every second
+     while (true) {
+        time_t now;
+        struct tm timeinfo = { 0 };
+        char strftime_buf[64];
+
+        time(&now);
+        localtime_r(&now, &timeinfo);
+
+        if (timeinfo.tm_year < (2024 - 1900)) {
+            printf("Time is not set yet. Connecting to WiFi and getting time over NTP.\n");
+            vTaskDelay(2000 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+        printf("The current date/time in Montevideo is: %s\n", strftime_buf);
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
+    }
+
+
 }

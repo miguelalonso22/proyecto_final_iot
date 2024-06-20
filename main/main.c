@@ -1,4 +1,9 @@
 #include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdlib.h>
+
 #include "esp_netif.h"
 
 #include <string.h>
@@ -7,6 +12,16 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+// #include "protocol_examples_common.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
+
+#include "lwip/sockets.h"
+#include "lwip/dns.h"
+#include "lwip/netdb.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -16,11 +31,120 @@
 #include "esp_sntp.h"
 #include "time.h"
 
+#include "mqtt_client.h"
+
 // ----- INICIO SECCIÓN UTILIDADES -----
 // Definición de la macro MIN
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
+
+static const char *TAG = "mqtt_example";
+
+
+static void log_error_if_nonzero(const char *message, int error_code)
+{
+    if (error_code != 0) {
+        ESP_LOGE(TAG, "Last error %s: 0x%x", message, error_code);
+    }
+}
+
+char *topico = "";
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
+    esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 0);
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, topico, 0);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
+        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+
+        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
+        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
+        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
+        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        break;
+    case MQTT_EVENT_UNSUBSCRIBED:
+        ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_PUBLISHED:
+        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
+        break;
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        printf("DATA=%.*s\r\n", event->data_len, event->data);
+        break;
+    case MQTT_EVENT_ERROR:
+        ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
+        if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
+            log_error_if_nonzero("reported from esp-tls", event->error_handle->esp_tls_last_esp_err);
+            log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
+            log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
+            ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
+
+        }
+        break;
+    default:
+        ESP_LOGI(TAG, "Other event id:%d", event->event_id);
+        break;
+    }
+}
+
+static const char *brokerUri = "";
+
+static void mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = brokerUri,
+    };
+#if CONFIG_BROKER_URL_FROM_STDIN
+    char line[128];
+
+    if (strcmp(mqtt_cfg.broker.address.uri, "FROM_STDIN") == 0) {
+        int count = 0;
+        printf("Please enter url of mqtt broker\n");
+        while (count < 128) {
+            int c = fgetc(stdin);
+            if (c == '\n') {
+                line[count] = '\0';
+                break;
+            } else if (c > 0 && c < 127) {
+                line[count] = c;
+                ++count;
+            }
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+        mqtt_cfg.broker.address.uri = line;
+        printf("Broker url: %s\n", line);
+    } else {
+        ESP_LOGE(TAG, "Configuration mismatch: wrong broker url");
+        abort();
+    }
+#endif /* CONFIG_BROKER_URL_FROM_STDIN */
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+}
 
 // Función para reemplazar '+' con ' ' en una cadena
 void replace_plus_with_space(char *str) {
@@ -37,6 +161,39 @@ const int   daylightOffset_sec = 0;  // No hay horario de verano
 
 bool synchronized = false;
 
+void set_ntp(void){
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, ntpServer);
+    esp_sntp_init();
+
+    setenv("TZ", "<-03>3", 1);
+    tzset();
+}
+
+static char strftime_buf[64];
+
+static char* get_time(void) {
+    time_t now;
+    struct tm timeinfo = { 0 };
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    if (timeinfo.tm_year < (2024 - 1900)) {
+        synchronized = false;
+        printf("Time is not set yet. Connecting to WiFi and getting time over NTP.\n");
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        return "Time not set yet";
+    } else {
+        synchronized = true;
+        
+    }
+
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    printf("The current date/time in Montevideo is: %s\n", strftime_buf);
+    
+    return strftime_buf;
+}
 // ----- FIN SECCIÓN UTILIDADES -----
 
 
@@ -53,36 +210,46 @@ bool synchronized = false;
     "body { font-family: Arial; display: flex; justify-content: center; align-items: center; height: 100vh; }"
     "</style>"
     "<script>"
-    "function startTime() {"
-                     "  fetch('/time')"
-                     "  .then(response => response.json())"
-                     "  .then(data => {document.getElementById('timeContainer').innerHTML = data.time;"
-                     "  setTimeout(startTime, 1000);})" // Actualiza la hora cada segundo
-                     "  .catch(error => console.log('Error:', error));"
-                     "}"
-                     "  function checkTime(i) {"
-                     "  if (i < 10) {i = '0' + i};"
-                     "  return i;"
-                     "}"
+    "let lastTime = \"\";" // Variable para almacenar la última hora recibida del servidor
+    "function fetchTime() {"
+    "    fetch('/time')"
+    "    .then(response => response.json())"
+    "    .then(data => {"
+    "        lastTime = data.time;"
+    "        document.getElementById('timeContainer').innerHTML = lastTime;"
+    "        updateTime();"
+    "    })"
+    "    .catch(error => console.log('Error:', error));"
+    "}"
+    "function updateTime() {"
+    "    if (lastTime) {"
+    "        let currentTime = new Date(lastTime);"
+    "        currentTime.setSeconds(currentTime.getSeconds() + 1);"
+    "        lastTime = currentTime.toString();"
+    "        document.getElementById('timeContainer').innerHTML = currentTime.toLocaleString();"
+    "        setTimeout(updateTime, 1000);"
+    "    }"
+    "}"
     "function submitForm(event, formId, endpoint) {"
-            "event.preventDefault();"
-            "var formData = new URLSearchParams();"
-            "for (const pair of new FormData(document.getElementById(formId))) {"
-                "formData.append(pair[0], pair[1]);"
-            "}"
-            "fetch(endpoint, {"
-                "method: 'POST',"
-                "headers: { 'Content-Type': 'application/x-www-form-urlencoded' },"
-                "body: formData.toString()"
-            "})"
-            ".then(response => response.text())"
-            ".then(data => { document.getElementById(formId + 'Response').innerHTML = data; })"
-            ".catch(error => console.error('Error:', error));"
-        "}"
+    "    event.preventDefault();"
+    "    var formData = new URLSearchParams();"
+    "    for (const pair of new FormData(document.getElementById(formId))) {"
+    "        formData.append(pair[0], pair[1]);"
+    "    }"
+    "    fetch(endpoint, {"
+    "        method: 'POST',"
+    "        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },"
+    "        body: formData.toString()"
+    "    })"
+    "    .then(response => response.text())"
+    "    .then(data => { document.getElementById(formId + 'Response').innerHTML = data; })"
+    "    .catch(error => console.error('Error:', error));"
+    "}"
+
     "</script>"
 
     "</head>"
-    "<body onload='startTime()'>"
+    "<body>"
     "<div>"
         "<h1>Bienvenido!</h1>" "<h2>Al Proyecto Final IOT de Miguel Alonso, Agustina Roballo y Diego Durán </h2>"
         "<h3>Configuraciones de Red</h3>"
@@ -104,6 +271,7 @@ bool synchronized = false;
         "</form>"
         "<div id=\"formMQTTResponse\"></div>"
         "<h3>Hora Actual</h3>"
+        "<button onclick=\"fetchTime()\">Sincronizar</button>"
         "<div id=\"timeContainer\"></div>"
     "</div>"
     "</body>"
@@ -118,31 +286,20 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
 
 esp_err_t time_handler(httpd_req_t *req)
 { 
-    if(synchronized == false){
+    char* time_str = get_time();
+    if (strcmp(time_str, "Time not set yet") == 0) {
+        printf("Time is not set yet\n");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    char strftime_buf[64];
-    time_t now;
-    struct tm timeinfo;
 
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    strftime(strftime_buf, sizeof(strftime_buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-
-    char* resp_str = (char*)malloc(100);
-    if (!resp_str) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-    // sprintf(resp_str, "{\"time\": \"%s\"}", strftime_buf);
-     snprintf(resp_str, 100, "{\"time\": \"%s\"}", strftime_buf);
-
+    char resp_str[100];
+    snprintf(resp_str, sizeof(resp_str), "{\"time\": \"%s\"}", time_str);
+ 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_str, strlen(resp_str));
-    // printf("Rquested time: %s", resp_str);
+    printf("Rquested time: %s", resp_str);
 
-    free(resp_str);
     return ESP_OK;
 }
 
@@ -226,10 +383,21 @@ esp_err_t red_post_handler(httpd_req_t *req) {
 
     // Verificar conexión actual
     wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK && strcmp((char *)ap_info.ssid, ssid) == 0) {
-        httpd_resp_send(req, "Ya conectado a la red deseada", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        if (strcmp((char *)ap_info.ssid, ssid) == 0) {
+            ESP_LOGI("HTTP", "Ya conectado a la red deseada");
+            httpd_resp_send(req, "Ya conectado a la red deseada", HTTPD_RESP_USE_STRLEN);
+            return ESP_OK;
+        }
+    } else {
+        ESP_LOGW("WIFI", "No se pudo obtener información del AP actual, intentando reconectar...");
     }
+    //
+    // wifi_ap_record_t ap_info;
+    // if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK && strcmp((char *)ap_info.ssid, ssid) == 0) {
+    //     httpd_resp_send(req, "Ya conectado a la red deseada", HTTPD_RESP_USE_STRLEN);
+    //     return ESP_OK;
+    // }
 
     httpd_resp_send(req, ssid, strlen(ssid));  // Enviar SSID como respuesta
     
@@ -240,13 +408,12 @@ esp_err_t red_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    ESP_LOGI("HTTP", "Conexión exitosa: %s", ssid);
     return ESP_OK;
 }
 
 
 esp_err_t mqtt_post_handler(httpd_req_t *req) {
-char buf[256] = {0};
+    char buf[256] = {0};
     int ret, remaining = req->content_len;
 
     if (remaining > 0) {
@@ -272,22 +439,29 @@ char buf[256] = {0};
 
     // Extraer y decodificar cada campo
     char broker[100], topic[100];
+    char mqttURL[150] = "mqtt://";
 
     httpd_query_key_value(buf, "broker", broker, sizeof(broker));
     httpd_query_key_value(buf, "topic", topic, sizeof(topic));
+
 
     // Reemplazar '+' con espacios
     replace_plus_with_space(broker);
     replace_plus_with_space(topic);
 
-    printf("Broker: %s, Topic: %s\n", broker, topic);
+    strcat(mqttURL, broker);
+
+    printf("Broker: %s, Topic: %s\n", mqttURL, topic);
 
     httpd_resp_send(req, "Datos recibidos", HTTPD_RESP_USE_STRLEN);
     
   // Configurar broker con los datos recibidos
+    brokerUri = mqttURL;
+    topico = topic;
+    mqtt_app_start();
     return ESP_OK;
-
 }
+
 // ENDPOINTS
 httpd_uri_t home = {
     .uri       = "/",
@@ -348,6 +522,7 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
 
             ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
             printf("Got IP: %d.%d.%d.%d\n", IP2STR(&event->ip_info.ip));
+            printf("Conexión exitosa:");
             s_retry_num = 0;
             break;
 
@@ -376,15 +551,18 @@ void wifi_init(void)
 // Inicializar el stack de WiFi
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_wifi_init(&cfg);
-    // esp_wifi_set_storage(WIFI_STORAGE_RAM);
 
-
-    wifi_config_t wifi_config = {
+      // Configuración específica para STA
+    wifi_config_t wifi_sta_config = {
         .sta = {
-            .ssid = "Miguel",
-            .password = "32554803",
+            .ssid = "caliope",
+            .password = "sinlugar",
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
+        }
+    };
+
+    // Configuración específica para AP
+    wifi_config_t wifi_ap_config = {
         .ap = {
             .ssid = "MiAP",
             .ssid_len = strlen("MiAP"),
@@ -392,21 +570,38 @@ void wifi_init(void)
             .password = "password123",
             .max_connection = 4,
             .authmode = WIFI_AUTH_WPA2_PSK
-        },
+        }
     };
 
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
-    esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
-
-    // Registrar el manejador de eventos de WiFi
+  // Registrar el manejador de eventos de WiFi
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_register(WIFI_EVENT,
                                         ESP_EVENT_ANY_ID,
                                         &event_handler,
                                         NULL,
                                         &instance_any_id);
+    // wifi_config_t wifi_config = {
+    //     .sta = {
+    //         .ssid = "caliope",
+    //         .password = "sinlugar",
+    //         .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+    //     },
+    //     .ap = {
+    //         .ssid = "MiAP",
+    //         .ssid_len = strlen("MiAP"),
+    //         .channel = 1,
+    //         .password = "password123",
+    //         .max_connection = 4,
+    //         .authmode = WIFI_AUTH_WPA2_PSK
+    //     },
+    // };
+    //
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_ap_config));
+    esp_wifi_start();
+
+  
 
     printf("WiFi started\n");
 
@@ -432,38 +627,7 @@ void start_webserver(void)
 void app_main(void)
 {
     wifi_init();
-
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, ntpServer);
-    esp_sntp_init();
-
-    setenv("TZ", "<-03>3", 1);
-    tzset();
-
+    set_ntp();
     start_webserver();
-    // Create a loop that prints the time every second
-     while (true) {
-        time_t now;
-        struct tm timeinfo = { 0 };
-        char strftime_buf[64];
-
-        time(&now);
-        localtime_r(&now, &timeinfo);
-
-        if (timeinfo.tm_year < (2024 - 1900)) {
-            synchronized = false;
-            printf("Time is not set yet. Connecting to WiFi and getting time over NTP.\n");
-            vTaskDelay(2000 / portTICK_PERIOD_MS);
-            continue;
-        } else {
-            synchronized = true;
-            
-        }
-
-        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-        printf("The current date/time in Montevideo is: %s\n", strftime_buf);
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
-    }
- 
-
+    // mqtt_app_start();
 }

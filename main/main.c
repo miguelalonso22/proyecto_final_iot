@@ -32,6 +32,9 @@
 
 #include "mqtt_client.h"
 
+#include "esp_spiffs.h"
+#include "../components/audio/audio.c"
+
 // ----- PROTOTIPOS DE FUNCIONES -----
 
 // Wifi
@@ -44,10 +47,10 @@ void set_ntp(void);
 static char* get_time(void);
 
 // Server
-esp_err_t index_get_handler(httpd_req_t *req);
-esp_err_t red_post_handler(httpd_req_t *req);
-esp_err_t mqtt_post_handler(httpd_req_t *req);
-esp_err_t time_handler(httpd_req_t *req);
+// esp_err_t index_get_handler(httpd_req_t *req);
+// esp_err_t red_post_handler(httpd_req_t *req);
+// esp_err_t mqtt_post_handler(httpd_req_t *req);
+// esp_err_t time_handler(httpd_req_t *req);
 void start_webserver(void);
 
 // Utilidades
@@ -340,8 +343,7 @@ esp_err_t mqtt_post_handler(httpd_req_t *req) {
 
     // Extraer y decodificar cada campo
     char broker[100], topic[100];
-    char mqttURL[150] = "mqtt://";
-
+    char mqttURL[150] = "mqtt://broker."; // "mqtt://broker.hivemq.com"
     httpd_query_key_value(buf, "broker", broker, sizeof(broker));
     httpd_query_key_value(buf, "topic", topic, sizeof(topic));
 
@@ -539,17 +541,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
         msg_id = esp_mqtt_client_subscribe(client, topico, 0);
         ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -557,7 +552,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
+        msg_id = esp_mqtt_client_publish(client, topico, "data", 0, 0, 0);
         ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
@@ -625,6 +620,70 @@ static char* get_time(void) {
 }
 // ----- FIN SECCIÓN NTP -----
 
+// ----- INICIO SECCIÓN SPIFFS -----
+esp_err_t spiffs_init(void)
+{
+    esp_err_t ret = ESP_OK;
+    ESP_LOGI(TAG, "Initializing SPIFFS");
+
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    /*!< Use settings defined above to initialize and mount SPIFFS filesystem. */
+    /*!< Note: esp_vfs_spiffs_register is an all-in-one convenience function. */
+    ret = esp_vfs_spiffs_register(&conf);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount or format filesystem");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "Failed to find SPIFFS partition");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+        }
+
+        return ret;
+    }
+
+    size_t total = 0, used = 0;
+    ret = esp_spiffs_info(NULL, &total, &used);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
+    }
+
+    /*!< Open renamed file for reading */
+    ESP_LOGI(TAG, "Reading file");
+    FILE *f = fopen("/spiffs/spiffs.txt", "r");
+
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for reading");
+        return ESP_FAIL;
+    }
+
+    char line[64];
+    fgets(line, sizeof(line), f);
+    fclose(f);
+    /*!< strip newline */
+    char *pos = strchr(line, '\n');
+
+    if (pos) {
+        *pos = '\0';
+    }
+
+    ESP_LOGI(TAG, "Read from file: '%s'", line);
+
+    return ESP_OK;
+}
+
+// ----- FIN SECCIÓN SPIFFS -----
+
 // ----- INICIO SECCIÓN MAIN -----
 void start_webserver(void)
 {
@@ -632,7 +691,7 @@ void start_webserver(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     
     // Iniciar el servidor web
-    if (httpd_start(&server, &config) == ESP_OK) {
+    if (httpd_start(&server, &config) == ESP_OK) { // Si el servidor se inició correctamente, registrar los manejadores de URI
         httpd_register_uri_handler(server, &home);
         httpd_register_uri_handler(server, &redConfig);
         httpd_register_uri_handler(server, &mqttConfig);

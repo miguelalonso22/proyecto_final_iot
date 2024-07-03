@@ -80,15 +80,11 @@ typedef enum {
     PREV
 } CommandType;
 
+// Estructura de las entradas del logger
 typedef struct {
     CommandType command;
     time_t timestamp;
 } LogEntry;
-
-//
-// typedef struct {
-//     CommandType command;
-// } Instruction;
 
 // Estructura del logger
 typedef struct {
@@ -100,117 +96,21 @@ typedef struct {
 
 Logger logger ;
 QueueHandle_t instructionQueue;
-// nvs_handle_t song_nvs_handle;
 
-
-// // Función para inicializar el logger
-// void initLogger(Logger *logger) {
-//     logger->head = 0;
-//     logger->tail = 0;
-//     logger->count = 0;
-// }
-//
 void init_logger() {
     logger.head = 0;
     logger.tail = 0;
     logger.count = 0;
 }
 
- // // Función para guardar el logger en NVS
-// void saveLoggerToNVS(Logger *logger) {
-//     esp_err_t err;
-//
-//     err = nvs_set_blob(song_nvs_handle, "logger", logger, sizeof(Logger));
-//     if (err != ESP_OK) {
-//         printf("Error guardando el logger en NVS: %s\n", esp_err_to_name(err));
-//     }
-//
-//     err = nvs_commit(song_nvs_handle);
-//     if (err != ESP_OK) {
-//         printf("Error haciendo commit al logger en NVS: %s\n", esp_err_to_name(err));
-//     }
-// }
-
-void save_logger_to_nvs() {
-    nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
-    if (err != ESP_OK) {
-        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
-        return;
-    }
-
-    err = nvs_set_blob(my_handle, "logger", &logger, sizeof(logger));
-    if (err != ESP_OK) {
-        printf("Error saving logger to NVS: %s\n", esp_err_to_name(err));
-    }
-
-    nvs_commit(my_handle);
-    nvs_close(my_handle);
+// Función para formatear la hora (time_t a string)
+// El tiempo se almacena como un valor en segundos desde el Unix Epoch (1 de enero de 1970).
+static char* format_time(time_t timestamp, char* buffer, size_t buffer_size) {
+    struct tm timeinfo;
+    localtime_r(&timestamp, &timeinfo);
+    strftime(buffer, buffer_size, "%c", &timeinfo);
+    return buffer;
 }
-
-
-
- // // Función para cargar el logger desde NVS
-// void loadLoggerFromNVS(Logger *logger) {
-//     size_t required_size = sizeof(Logger);
-//     esp_err_t err = nvs_get_blob(song_nvs_handle, "logger", logger, &required_size);
-//     if (err == ESP_ERR_NVS_NOT_FOUND) {
-//         printf("Logger no encontrado en NVS, inicializando uno nuevo\n");
-//         initLogger(logger);
-//     } else if (err != ESP_OK) {
-//         printf("Error cargando el logger desde NVS: %s\n", esp_err_to_name(err));
-//     }
-// }
-//
-void load_logger_from_nvs() {
-    nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
-    if (err != ESP_OK) {
-        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
-        return;
-    }
-
-    size_t required_size = sizeof(logger);
-    err = nvs_get_blob(my_handle, "logger", &logger, &required_size);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        printf("Logger not found in NVS, initializing new logger\n");
-        init_logger();
-    } else if (err != ESP_OK) {
-        printf("Error loading logger from NVS: %s\n", esp_err_to_name(err));
-    }
-
-    nvs_close(my_handle);
-}
-
-
-void log_instruction(CommandType instruction, time_t timestamp) {
-    if (logger.count < LOG_CAPACITY) {
-        logger.entries[logger.tail].timestamp = timestamp;
-        logger.entries[logger.tail].command = instruction;
-        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
-        logger.count++;
-    } else {
-        // Overwrite the oldest entry
-        logger.entries[logger.tail].timestamp = timestamp;
-        logger.entries[logger.tail].command = instruction;
-        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
-        logger.head = (logger.head + 1) % LOG_CAPACITY;
-    }
-}
-
-// // Función para agregar una instrucción al logger
-// void logInstruction(Logger *logger, const char *instruction) {
-//     snprintf(logger->log[logger->head], sizeof(logger->log[logger->head]), "%s at %s", instruction, get_time());
-//     logger->head = (logger->head + 1) % LOGGER_SIZE;
-//     if (logger->count < LOGGER_SIZE) {
-//         logger->count++;
-//     } else {
-//         logger->tail = (logger->tail + 1) % LOGGER_SIZE;
-//     }
-//
-//     // Guardar el logger en NVS
-//     saveLoggerToNVS(logger);
-// }
 
 // Función para convertir el CommandType a string para impresión
 const char* commandToString(CommandType command) {
@@ -226,13 +126,6 @@ const char* commandToString(CommandType command) {
         default:
             return "UNKNOWN";
     }
-}
-
-static char* format_time(time_t timestamp, char* buffer, size_t buffer_size) {
-    struct tm timeinfo;
-    localtime_r(&timestamp, &timeinfo);
-    strftime(buffer, buffer_size, "%c", &timeinfo);
-    return buffer;
 }
 
 // Función para imprimir el contenido del logger
@@ -253,7 +146,7 @@ int index = logger->head;
 }
 
 
-// Tarea que lee y ejecuta instrucciones
+// Tarea que lee y ejecuta instrucciones de la queue
 void instructionTask(void *pvParameters) {
     CommandType comando;
     while (1) {
@@ -286,7 +179,6 @@ void instructionTask(void *pvParameters) {
         }
     }
 }
-
 
 static const char *TAG = "mqtt";
 
@@ -446,9 +338,6 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-
-
-
 esp_err_t time_handler(httpd_req_t *req)
 { 
     time_t timestamp = get_time();
@@ -458,12 +347,9 @@ esp_err_t time_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    // Reescribir la hora como string
+    // Pasar la hora de time_t a string
     char time_str[64];
     format_time(timestamp, time_str, sizeof(time_str));
-    // struct tm timeinfo;
-    // localtime_r(&timestamp, &timeinfo);
-    // strftime(time_str, sizeof(time_str), "%c", &timeinfo);
 
     char resp_str[100];
     snprintf(resp_str, sizeof(resp_str), "{\"time\": \"%s\"}", time_str);
@@ -945,10 +831,11 @@ static time_t get_time(void) {
     time_t now;
     struct tm timeinfo = { 0 };
 
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    time(&now);// Obtener el tiempo actual en segundos desde el epoch (1 de enero de 1970)
+    localtime_r(&now, &timeinfo);// Formatear y almacenar el tiempo en struct timeinfo
 
-    if (timeinfo.tm_year < (2024 - 1900)) {
+    // Verificar si el año es menor a 2024
+    if (timeinfo.tm_year < (2024 - 1900)) { // Funciona midiendo la cantidad de años desde 1990 
         synchronized = false;
         printf("Time is not set yet. Waiting for system time to be set...\n");
         vTaskDelay(2000 / portTICK_PERIOD_MS);
@@ -958,21 +845,78 @@ static time_t get_time(void) {
         
     }
     // printf("The current date/time in Montevideo is: %s\n", asctime(&timeinfo));
-    
     return now;
 }
 
+// Tarea para sincronizar la hora
 void synchronize_time(void *pvParameters) {
-    // Esperar a que la hora sea sincronizada
+    // Llamamos a get_time hasta obtener una hora correcta --> Sinconización
     while (!synchronized) {
         get_time();
-        // printf("Waiting for system time to be set...\n");
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     printf("Synchronized Time\n");
     vTaskDelete(NULL);
 }
+
 // ----- FIN SECCIÓN NTP -----
+
+// ----- INICIO SECCIÓN LOGGER -----
+ // Función para guardar el logger en NVS
+void save_logger_to_nvs() {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_blob(my_handle, "logger", &logger, sizeof(logger));
+    if (err != ESP_OK) {
+        printf("Error saving logger to NVS: %s\n", esp_err_to_name(err));
+    }
+
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
+}
+
+ // Función para cargar el logger desde NVS
+void load_logger_from_nvs() {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (err != ESP_OK) {
+        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
+        return;
+    }
+
+    size_t required_size = sizeof(logger);
+    err = nvs_get_blob(my_handle, "logger", &logger, &required_size);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        printf("Logger not found in NVS, initializing new logger\n");
+        init_logger();
+    } else if (err != ESP_OK) {
+        printf("Error loading logger from NVS: %s\n", esp_err_to_name(err));
+    }
+
+    nvs_close(my_handle);
+}
+
+// Función para agregar una instrucción al logger
+void log_instruction(CommandType instruction, time_t timestamp) {
+    if (logger.count < LOG_CAPACITY) {
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.count++;
+    } else {
+        // Overwrite the oldest entry
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.head = (logger.head + 1) % LOG_CAPACITY;
+    }
+}
+// ----- FIN SECCIÓN LOGGER -----
 
 // ----- INICIO SECCIÓN SPIFFS -----
 

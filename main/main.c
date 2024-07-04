@@ -6,7 +6,6 @@
 
 #include "esp_netif.h"
 
-#include <string.h>
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -31,12 +30,18 @@
 #include "time.h"
 
 #include "mqtt_client.h"
-// #include "i2s_stream.h"
-// #include "i2c_bus.h"
 
+#include "esp_heap_caps.h"
+#include "esp_spiffs.h"
+#include "freertos/event_groups.h"
+#include "i2c_bus.h"
+#include "driver/rmt.h"
 
-// #include "esp_spiffs.h"
-// #include "../components/audio/audio.c"
+#include "led_strip.h"
+#include "touch.h"
+#include "audio.h"
+#include "es8311.h"
+#include "board.h"
 
 // ----- PROTOTIPOS DE FUNCIONES -----
 
@@ -232,6 +237,101 @@ bool synchronized = false;
 
 // ----- FIN SECCIÓN UTILIDADES -----
 
+// ----- INICIO SECCIÓN AUDIO -----
+
+// static const char *TAG = "audio";
+
+uint8_t mac[16];
+led_strip_t *strip;
+
+
+esp_err_t touch_audio_rmt_init(uint8_t gpio_num, int led_number, uint8_t rmt_channel)
+{
+    ESP_LOGI(TAG, "Initializing WS2812");
+    rmt_config_t config = RMT_DEFAULT_CONFIG_TX(gpio_num, rmt_channel);
+
+    /*!< set counter clock to 40MHz */
+    config.clk_div = 2;
+
+    ESP_ERROR_CHECK(rmt_config(&config));
+    ESP_ERROR_CHECK(rmt_driver_install(config.channel, 0, 0));
+
+    led_strip_config_t strip_config = LED_STRIP_DEFAULT_CONFIG(led_number, (led_strip_dev_t)config.channel);
+    strip = led_strip_new_rmt_ws2812(&strip_config);
+
+    if (!strip) {
+        ESP_LOGE(TAG, "install WS2812 driver failed");
+        return ESP_FAIL;
+    }
+
+    /*!< Clear LED strip (turn off all LEDs) */
+    ESP_ERROR_CHECK(strip->clear(strip, 100));
+    /*!< Show simple rainbow chasing pattern */
+
+    return ESP_OK;
+}
+
+esp_err_t spiffs_init(void)
+{
+    esp_err_t ret = ESP_OK;
+    ESP_LOGI(TAG, "Initializing SPIFFS");
+
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    /*!< Use settings defined above to initialize and mount SPIFFS filesystem. */
+    /*!< Note: esp_vfs_spiffs_register is an all-in-one convenience function. */
+    ret = esp_vfs_spiffs_register(&conf);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount or format filesystem");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "Failed to find SPIFFS partition");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+        }
+
+        return ret;
+    }
+
+    size_t total = 0, used = 0;
+    ret = esp_spiffs_info(NULL, &total, &used);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
+    }
+
+    /*!< Open renamed file for reading */
+    ESP_LOGI(TAG, "Reading file");
+    FILE *f = fopen("/spiffs/spiffs.txt", "r");
+
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for reading");
+        return ESP_FAIL;
+    }
+
+    char line[64];
+    fgets(line, sizeof(line), f);
+    fclose(f);
+    /*!< strip newline */
+    char *pos = strchr(line, '\n');
+
+    if (pos) {
+        *pos = '\0';
+    }
+
+    ESP_LOGI(TAG, "Read from file: '%s'", line);
+
+    return ESP_OK;
+}
+// ----- FIN SECCIÓN AUDIO -----
 
 // ----- INICIO SECCIÓN SERVER -----
 
@@ -953,20 +1053,6 @@ void app_main(void)
     set_ntp();
     start_webserver();
 
-   // esp_err_t ret = nvs_flash_init();
-   //  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-   //      ESP_ERROR_CHECK(nvs_flash_erase());
-   //      ret = nvs_flash_init();
-   //  }
-   //  ESP_ERROR_CHECK(ret);
-   //
-   // // Abrir el almacenamiento NVS
-   //  ret = nvs_open("storage", NVS_READWRITE, &song_nvs_handle);
-   //  if (ret != ESP_OK) {
-   //      printf("Error abriendo NVS: %s\n", esp_err_to_name(ret));
-   //      return;
-   //  }
-
    // Inicializar la cola
     instructionQueue = xQueueCreate(10, sizeof(CommandType));
     if (instructionQueue == NULL) {
@@ -975,21 +1061,19 @@ void app_main(void)
     }
 
    // Cargar el logger desde NVS
-    // loadLoggerFromNVS(&logger);
     load_logger_from_nvs();
 
 
     // Crear la tarea de instrucciones
     xTaskCreate(&instructionTask, "instructionTask", 2048, NULL, 5, NULL);
 
+    spiffs_init();
+    i2c_bus_init();
+    touch_audio_rmt_init(CONFIG_EXAMPLE_RMT_TX_GPIO, CONFIG_EXAMPLE_STRIP_LED_NUMBER, RMT_CHANNEL_0);
 
-    // Ejemplo de agregar instrucciones a la cola
-    // Instruction inst1 = {PLAY};
-    // Instruction inst2 = {NEXT};
-    // xQueueSend(instructionQueue, &inst1, portMAX_DELAY);
-    // vTaskDelay(pdMS_TO_TICKS(1000)); // Espera 1 segundo
-    // xQueueSend(instructionQueue, &inst2, portMAX_DELAY);
+    /*!< Initialize touch */
+    touch_init();
+    /*!< Initialize audio */
+    audio_init(strip);
 
-   // Imprimir el contenido del logger
-    // print_logger(&logger);
 }

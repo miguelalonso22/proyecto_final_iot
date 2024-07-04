@@ -31,6 +31,9 @@
 #include "time.h"
 
 #include "mqtt_client.h"
+// #include "i2s_stream.h"
+// #include "i2c_bus.h"
+
 
 // #include "esp_spiffs.h"
 // #include "../components/audio/audio.c"
@@ -46,6 +49,7 @@ static esp_err_t update_wifi_sta(const char* ssid, const char* pass);
 void set_ntp(void);
 static time_t get_time(void);
 void synchronize_time(void *pvParameters);
+
 
 // Server
 // esp_err_t index_get_handler(httpd_req_t *req);
@@ -144,7 +148,21 @@ int index = logger->head;
         index = (index + 1) % LOG_CAPACITY;
     }
 }
-
+// Función para agregar una instrucción al logger
+void log_instruction(CommandType instruction, time_t timestamp) {
+    if (logger.count < LOG_CAPACITY) {
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.count++;
+    } else {
+        // Overwrite the oldest entry
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.head = (logger.head + 1) % LOG_CAPACITY;
+    }
+}
 
 // Tarea que lee y ejecuta instrucciones de la queue
 void instructionTask(void *pvParameters) {
@@ -643,7 +661,7 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
             }
             break;
 
-        case IP_EVENT_STA_GOT_IP:
+        case IP_EVENT_STA_GOT_IP:{
             ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
             printf("Got IP: %d.%d.%d.%d\n", IP2STR(&event->ip_info.ip));
             printf("Conexión exitosa:");
@@ -653,6 +671,8 @@ void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id
                 printf("Failed to create task for time synchronization\n");
             }
             break;
+        }
+            
 
         default:
             break;
@@ -729,7 +749,7 @@ void wifi_init(void)
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = brokerUri,
+        .uri = brokerUri,
     };
 #if CONFIG_BROKER_URL_FROM_STDIN
     char line[128];
@@ -901,21 +921,7 @@ void load_logger_from_nvs() {
     nvs_close(my_handle);
 }
 
-// Función para agregar una instrucción al logger
-void log_instruction(CommandType instruction, time_t timestamp) {
-    if (logger.count < LOG_CAPACITY) {
-        logger.entries[logger.tail].timestamp = timestamp;
-        logger.entries[logger.tail].command = instruction;
-        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
-        logger.count++;
-    } else {
-        // Overwrite the oldest entry
-        logger.entries[logger.tail].timestamp = timestamp;
-        logger.entries[logger.tail].command = instruction;
-        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
-        logger.head = (logger.head + 1) % LOG_CAPACITY;
-    }
-}
+
 // ----- FIN SECCIÓN LOGGER -----
 
 // ----- INICIO SECCIÓN SPIFFS -----

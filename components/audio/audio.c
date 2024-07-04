@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -39,13 +41,14 @@ static const char *TAG = "AUDIO";
 
 #define SAMPLE_PER_CYCLE (SAMPLE_RATE/WAVE_FREQ_HZ)
 
-#define AUDIO_MAX_PLAY_LIST 1
+#define AUDIO_MAX_PLAY_LIST 2
 
 /*!< aduio music list from spiffs*/
 const char audio_list[AUDIO_MAX_PLAY_LIST][64] = {
     // "/spiffs/To_meet_the_prime_time_44k.mp3",
     // "/spiffs/myheart_44k.mp3",
     // "/spiffs/lemon_tree_8k.mp3",
+    "/spiffs/MONTEVIDEO_ESP.mp3",
     "/spiffs/LICK.mp3"
 };
 
@@ -249,6 +252,7 @@ static void audio_control_task(void *arg)
     uint32_t touch_num = 0;
     uint32_t volume = 50;
     es8311_set_voice_volume(volume);
+    play_flag = AUDIO_STOP;
 
     while (1) {
         touch_get_num(&touch_num);
@@ -327,3 +331,4 @@ int audio_init(led_strip_t *strip)
 
     return 0;
 }
+

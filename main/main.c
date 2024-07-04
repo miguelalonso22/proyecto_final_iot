@@ -169,6 +169,14 @@ void log_instruction(CommandType instruction, time_t timestamp) {
     }
 }
 
+
+// enum {
+//     AUDIO_STOP = 0,
+//     AUDIO_PLAY,
+//     AUDIO_NEXT,
+//     AUDIO_LAST
+// };
+
 // Tarea que lee y ejecuta instrucciones de la queue
 void instructionTask(void *pvParameters) {
     CommandType comando;
@@ -178,21 +186,26 @@ void instructionTask(void *pvParameters) {
                 case PLAY:
                     printf("Ejecutando instrucción: PLAY\n");
                     log_instruction(PLAY, get_time());
+                    play_flag = AUDIO_PLAY;
                     break;
                 case STOP:
                     printf("Ejecutando instrucción: STOP\n");
                     log_instruction(STOP, get_time());
+                    play_flag = AUDIO_STOP;
+
                     // logInstruction(&logger, "STOP");
                     break;
                 case NEXT:
                     printf("Ejecutando instrucción: NEXT\n");
                     log_instruction(NEXT, get_time());
             print_logger(&logger);
+                    play_flag = AUDIO_NEXT;
                     // logInstruction(&logger, "NEXT");
                     break;
                 case PREV:
                     printf("Ejecutando instrucción: PREV\n");
                     log_instruction(PREV, get_time());
+                    play_flag = AUDIO_LAST;
                     // logInstruction(&logger, "PREV");
                     break;
                 default:
@@ -804,8 +817,8 @@ void wifi_init(void)
     // Configuración específica para STA
     wifi_config_t wifi_sta_config = {
         .sta = {
-            .ssid = "Miguel",
-            .password = "32554803",
+            .ssid = "iPhone del Diego",
+            .password = "diegoddl",
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         }
     };

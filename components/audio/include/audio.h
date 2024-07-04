@@ -27,7 +27,7 @@ extern "C" {
  * @param strip LED strip 
  */
 int audio_init(led_strip_t *strip);
-
+int play_flag;
 #ifdef __cplusplus
 }
 #endif

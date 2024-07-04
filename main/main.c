@@ -31,6 +31,9 @@
 #include "time.h"
 
 #include "mqtt_client.h"
+// #include "i2s_stream.h"
+// #include "i2c_bus.h"
+
 
 // #include "esp_spiffs.h"
 // #include "../components/audio/audio.c"
@@ -39,12 +42,14 @@
 
 // Wifi
 void wifi_init(void);
-static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 static esp_err_t update_wifi_sta(const char* ssid, const char* pass);
 
 // NTP
 void set_ntp(void);
-static char* get_time(void);
+static time_t get_time(void);
+void synchronize_time(void *pvParameters);
+
 
 // Server
 // esp_err_t index_get_handler(httpd_req_t *req);
@@ -68,6 +73,130 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
+
+#define LOG_CAPACITY 20
+
+// Estructura de las instrucciones
+typedef enum {
+    PLAY,
+    STOP,
+    NEXT,
+    PREV
+} CommandType;
+
+// Estructura de las entradas del logger
+typedef struct {
+    CommandType command;
+    time_t timestamp;
+} LogEntry;
+
+// Estructura del logger
+typedef struct {
+    LogEntry entries[LOG_CAPACITY];  // Almacenará la instrucción "next"-"prev"-"play"-"stop" y la hora
+    int head;
+    int tail;
+    int count;
+} Logger;
+
+Logger logger ;
+QueueHandle_t instructionQueue;
+
+void init_logger() {
+    logger.head = 0;
+    logger.tail = 0;
+    logger.count = 0;
+}
+
+// Función para formatear la hora (time_t a string)
+// El tiempo se almacena como un valor en segundos desde el Unix Epoch (1 de enero de 1970).
+static char* format_time(time_t timestamp, char* buffer, size_t buffer_size) {
+    struct tm timeinfo;
+    localtime_r(&timestamp, &timeinfo);
+    strftime(buffer, buffer_size, "%c", &timeinfo);
+    return buffer;
+}
+
+// Función para convertir el CommandType a string para impresión
+const char* commandToString(CommandType command) {
+    switch (command) {
+        case PLAY:
+            return "PLAY";
+        case STOP:
+            return "STOP";
+        case NEXT:
+            return "NEXT";
+        case PREV:
+            return "PREV";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+// Función para imprimir el contenido del logger
+void print_logger(Logger *logger) {
+    printf("Logger Entries:\n");
+    if (logger->count == 0) {
+        printf("No entries to display.\n");
+        return;
+    }
+
+int index = logger->head;
+    for (int i = 0; i < logger->count; i++) {
+        char time_str[64];
+        format_time(logger->entries[index].timestamp, time_str, sizeof(time_str));
+        printf("Entry %d: %s at %s\n", i + 1, commandToString(logger->entries[index].command), time_str);
+        index = (index + 1) % LOG_CAPACITY;
+    }
+}
+// Función para agregar una instrucción al logger
+void log_instruction(CommandType instruction, time_t timestamp) {
+    if (logger.count < LOG_CAPACITY) {
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.count++;
+    } else {
+        // Overwrite the oldest entry
+        logger.entries[logger.tail].timestamp = timestamp;
+        logger.entries[logger.tail].command = instruction;
+        logger.tail = (logger.tail + 1) % LOG_CAPACITY;
+        logger.head = (logger.head + 1) % LOG_CAPACITY;
+    }
+}
+
+// Tarea que lee y ejecuta instrucciones de la queue
+void instructionTask(void *pvParameters) {
+    CommandType comando;
+    while (1) {
+        if (xQueueReceive(instructionQueue, &comando, portMAX_DELAY) == pdPASS) {
+            switch (comando) {
+                case PLAY:
+                    printf("Ejecutando instrucción: PLAY\n");
+                    log_instruction(PLAY, get_time());
+                    break;
+                case STOP:
+                    printf("Ejecutando instrucción: STOP\n");
+                    log_instruction(STOP, get_time());
+                    // logInstruction(&logger, "STOP");
+                    break;
+                case NEXT:
+                    printf("Ejecutando instrucción: NEXT\n");
+                    log_instruction(NEXT, get_time());
+            print_logger(&logger);
+                    // logInstruction(&logger, "NEXT");
+                    break;
+                case PREV:
+                    printf("Ejecutando instrucción: PREV\n");
+                    log_instruction(PREV, get_time());
+                    // logInstruction(&logger, "PREV");
+                    break;
+                default:
+                    printf("Instrucción desconocida\n");
+                    break;
+            }
+        }
+    }
+}
 
 static const char *TAG = "mqtt";
 
@@ -150,6 +279,31 @@ bool synchronized = false;
     "    })"
     "    .then(response => response.text())"
     "    .then(data => { document.getElementById(formId + 'Response').innerHTML = data; })"
+    // ".then(response => window.location.reload())"
+    "    .catch(error => console.error('Error:', error));"
+    "}"
+    "function playSong() {"
+    "    fetch('/playSong')"
+    "    .then(response => response.text())"
+    "    .then(data => { console.log(data); })"
+    "    .catch(error => console.error('Error:', error));"
+    "}"
+    "function stopSong() {"
+    "    fetch('/stopSong')"
+    "    .then(response => response.text())"
+    "    .then(data => { console.log(data); })"
+    "    .catch(error => console.error('Error:', error));"
+    "}"
+    "function nextSong() {"
+    "    fetch('/nextSong')"
+    "    .then(response => response.text())"
+    "    .then(data => { console.log(data); })"
+    "    .catch(error => console.error('Error:', error));"
+    "}"
+    "function prevSong() {"
+    "    fetch('/prevSong')"
+    "    .then(response => response.text())"
+    "    .then(data => { console.log(data); })"
     "    .catch(error => console.error('Error:', error));"
     "}"
 
@@ -180,6 +334,15 @@ bool synchronized = false;
         "<h3>Hora Actual</h3>"
         "<button onclick=\"fetchTime()\">Sincronizar</button>"
         "<div id=\"timeContainer\"></div>"
+        "<h3>Reproductor de Música</h3>"
+        "<div>"
+        "<button onClick=prevSong()>Anterior</button>"
+        "<button onClick=playSong()>Reproducir</button>"
+        "<button onClick=stopSong()>Stop</button>"
+        "<button onClick=nextSong()>Siguiente</button>"
+        // "<button onClick=playPause()>Play/Pause</button>"
+        "</div>"
+
     "</div>"
     "</body>"
     "</html>";
@@ -195,12 +358,16 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
 
 esp_err_t time_handler(httpd_req_t *req)
 { 
-    char* time_str = get_time();
-    if (strcmp(time_str, "Time not set yet") == 0) {
+    time_t timestamp = get_time();
+    if (timestamp == (time_t)0) {
         printf("Time is not set yet\n");
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
+
+    // Pasar la hora de time_t a string
+    char time_str[64];
+    format_time(timestamp, time_str, sizeof(time_str));
 
     char resp_str[100];
     snprintf(resp_str, sizeof(resp_str), "{\"time\": \"%s\"}", time_str);
@@ -364,6 +531,50 @@ esp_err_t mqtt_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+esp_err_t playSong_handler(httpd_req_t *req) {
+    // play_song();
+    CommandType command = PLAY;
+    if (xQueueSend(instructionQueue, &command, portMAX_DELAY) != pdPASS) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_send(req, "Reproduciendo canción", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+esp_err_t stopSong_handler(httpd_req_t *req) {
+    // stop_song(); 
+    CommandType command = STOP;
+    if (xQueueSend(instructionQueue, &command, portMAX_DELAY) != pdPASS) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_send(req, "Canción detenida", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+esp_err_t nextSong_handler(httpd_req_t *req) {
+    // next_song();
+    CommandType command = NEXT;
+    if (xQueueSend(instructionQueue, &command, portMAX_DELAY) != pdPASS) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_send(req, "Siguiente canción", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+esp_err_t prevSong_handler(httpd_req_t *req) {
+    // prev_song();
+    CommandType command = PREV;
+    if (xQueueSend(instructionQueue, &command, portMAX_DELAY) != pdPASS) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    httpd_resp_send(req, "Canción anterior", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 // ENDPOINTS
 httpd_uri_t home = {
     .uri       = "/",
@@ -393,6 +604,34 @@ httpd_uri_t uri_time = {
     .user_ctx  = NULL
 };
 
+httpd_uri_t playSong = {
+    .uri       = "/playSong",
+    .method    = HTTP_GET,
+    .handler   = playSong_handler,
+    .user_ctx  = NULL
+};
+
+httpd_uri_t stopSong = {
+    .uri       = "/stopSong",
+    .method    = HTTP_GET,
+    .handler   = stopSong_handler,
+    .user_ctx  = NULL
+};
+
+httpd_uri_t nextSong = {
+    .uri       = "/nextSong",
+    .method    = HTTP_GET,
+    .handler   = nextSong_handler,
+    .user_ctx  = NULL
+};
+
+httpd_uri_t prevSong = {
+    .uri       = "/prevSong",
+    .method    = HTTP_GET,
+    .handler   = prevSong_handler,
+    .user_ctx  = NULL
+};
+
 // ----- FIN SECCIÓN SERVER -----
 
 // ----- INICIO SECCIÓN WIFI -----
@@ -402,7 +641,7 @@ static int s_retry_num = 0;
 static const int EXAMPLE_ESP_MAXIMUM_RETRY = 5;
 
 // Manejador de eventos de WiFi
-void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     switch(event_id) {
 
         case WIFI_EVENT_STA_START:
@@ -422,12 +661,18 @@ void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, voi
             }
             break;
 
-        case IP_EVENT_STA_GOT_IP:
+        case IP_EVENT_STA_GOT_IP:{
             ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
             printf("Got IP: %d.%d.%d.%d\n", IP2STR(&event->ip_info.ip));
             printf("Conexión exitosa:");
             s_retry_num = 0;
+
+            if (xTaskCreate(&synchronize_time, "synchronize_time", 4096, NULL, 5, NULL) != pdPASS) {
+                printf("Failed to create task for time synchronization\n");
+            }
             break;
+        }
+            
 
         default:
             break;
@@ -459,8 +704,8 @@ void wifi_init(void)
     // Configuración específica para STA
     wifi_config_t wifi_sta_config = {
         .sta = {
-            .ssid = "caliope",
-            .password = "sinlugar",
+            .ssid = "Miguel",
+            .password = "32554803",
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         }
     };
@@ -481,9 +726,15 @@ void wifi_init(void)
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_register(WIFI_EVENT,
                                         ESP_EVENT_ANY_ID,
-                                        &event_handler,
+                                        &wifi_event_handler,
                                         NULL,
                                         &instance_any_id);
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        NULL));
+
     // Configurar el modo APSTA
     esp_wifi_set_mode(WIFI_MODE_APSTA);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_sta_config));
@@ -498,7 +749,7 @@ void wifi_init(void)
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = brokerUri,
+        .uri = brokerUri,
     };
 #if CONFIG_BROKER_URL_FROM_STDIN
     char line[128];
@@ -596,92 +847,85 @@ void set_ntp(void){
 }
 
 // Función para obtener la hora actual
-static char* get_time(void) {
+static time_t get_time(void) {
     time_t now;
     struct tm timeinfo = { 0 };
 
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    time(&now);// Obtener el tiempo actual en segundos desde el epoch (1 de enero de 1970)
+    localtime_r(&now, &timeinfo);// Formatear y almacenar el tiempo en struct timeinfo
 
-    if (timeinfo.tm_year < (2024 - 1900)) {
+    // Verificar si el año es menor a 2024
+    if (timeinfo.tm_year < (2024 - 1900)) { // Funciona midiendo la cantidad de años desde 1990 
         synchronized = false;
-        printf("Time is not set yet. Connecting to WiFi and getting time over NTP.\n");
+        printf("Time is not set yet. Waiting for system time to be set...\n");
         vTaskDelay(2000 / portTICK_PERIOD_MS);
-        return "Time not set yet";
+        return (time_t)0; // Retorna 0 si la hora no está sincronizada
     } else {
         synchronized = true;
         
     }
-
-    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-    printf("The current date/time in Montevideo is: %s\n", strftime_buf);
-    
-    return strftime_buf;
+    // printf("The current date/time in Montevideo is: %s\n", asctime(&timeinfo));
+    return now;
 }
+
+// Tarea para sincronizar la hora
+void synchronize_time(void *pvParameters) {
+    // Llamamos a get_time hasta obtener una hora correcta --> Sinconización
+    while (!synchronized) {
+        get_time();
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+    printf("Synchronized Time\n");
+    vTaskDelete(NULL);
+}
+
 // ----- FIN SECCIÓN NTP -----
 
+// ----- INICIO SECCIÓN LOGGER -----
+ // Función para guardar el logger en NVS
+void save_logger_to_nvs() {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_blob(my_handle, "logger", &logger, sizeof(logger));
+    if (err != ESP_OK) {
+        printf("Error saving logger to NVS: %s\n", esp_err_to_name(err));
+    }
+
+    nvs_commit(my_handle);
+    nvs_close(my_handle);
+}
+
+ // Función para cargar el logger desde NVS
+void load_logger_from_nvs() {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &my_handle);
+    if (err != ESP_OK) {
+        printf("Error opening NVS handle: %s\n", esp_err_to_name(err));
+        return;
+    }
+
+    size_t required_size = sizeof(logger);
+    err = nvs_get_blob(my_handle, "logger", &logger, &required_size);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        printf("Logger not found in NVS, initializing new logger\n");
+        init_logger();
+    } else if (err != ESP_OK) {
+        printf("Error loading logger from NVS: %s\n", esp_err_to_name(err));
+    }
+
+    nvs_close(my_handle);
+}
+
+
+// ----- FIN SECCIÓN LOGGER -----
+
 // ----- INICIO SECCIÓN SPIFFS -----
-// esp_err_t spiffs_init(void)
-// {
-//     esp_err_t ret = ESP_OK;
-//     ESP_LOGI(TAG, "Initializing SPIFFS");
-//
-//     esp_vfs_spiffs_conf_t conf = {
-//         .base_path = "/spiffs",
-//         .partition_label = NULL,
-//         .max_files = 5,
-//         .format_if_mount_failed = true
-//     };
-//
-//     /*!< Use settings defined above to initialize and mount SPIFFS filesystem. */
-//     /*!< Note: esp_vfs_spiffs_register is an all-in-one convenience function. */
-//     ret = esp_vfs_spiffs_register(&conf);
-//
-//     if (ret != ESP_OK) {
-//         if (ret == ESP_FAIL) {
-//             ESP_LOGE(TAG, "Failed to mount or format filesystem");
-//         } else if (ret == ESP_ERR_NOT_FOUND) {
-//             ESP_LOGE(TAG, "Failed to find SPIFFS partition");
-//         } else {
-//             ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
-//         }
-//
-//         return ret;
-//     }
-//
-//     size_t total = 0, used = 0;
-//     ret = esp_spiffs_info(NULL, &total, &used);
-//
-//     if (ret != ESP_OK) {
-//         ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
-//     } else {
-//         ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
-//     }
-//
-//     /*!< Open renamed file for reading */
-//     ESP_LOGI(TAG, "Reading file");
-//     FILE *f = fopen("/spiffs/spiffs.txt", "r");
-//
-//     if (f == NULL) {
-//         ESP_LOGE(TAG, "Failed to open file for reading");
-//         return ESP_FAIL;
-//     }
-//
-//     char line[64];
-//     fgets(line, sizeof(line), f);
-//     fclose(f);
-//     /*!< strip newline */
-//     char *pos = strchr(line, '\n');
-//
-//     if (pos) {
-//         *pos = '\0';
-//     }
-//
-//     ESP_LOGI(TAG, "Read from file: '%s'", line);
-//
-//     return ESP_OK;
-// }
-//
+
 // ----- FIN SECCIÓN SPIFFS -----
 
 // ----- INICIO SECCIÓN MAIN -----
@@ -696,6 +940,10 @@ void start_webserver(void)
         httpd_register_uri_handler(server, &redConfig);
         httpd_register_uri_handler(server, &mqttConfig);
         httpd_register_uri_handler(server, &uri_time);
+        httpd_register_uri_handler(server, &playSong);
+        httpd_register_uri_handler(server, &stopSong);
+        httpd_register_uri_handler(server, &nextSong);
+        httpd_register_uri_handler(server, &prevSong);
     }
 }
 
@@ -704,4 +952,44 @@ void app_main(void)
     wifi_init();
     set_ntp();
     start_webserver();
+
+   // esp_err_t ret = nvs_flash_init();
+   //  if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+   //      ESP_ERROR_CHECK(nvs_flash_erase());
+   //      ret = nvs_flash_init();
+   //  }
+   //  ESP_ERROR_CHECK(ret);
+   //
+   // // Abrir el almacenamiento NVS
+   //  ret = nvs_open("storage", NVS_READWRITE, &song_nvs_handle);
+   //  if (ret != ESP_OK) {
+   //      printf("Error abriendo NVS: %s\n", esp_err_to_name(ret));
+   //      return;
+   //  }
+
+   // Inicializar la cola
+    instructionQueue = xQueueCreate(10, sizeof(CommandType));
+    if (instructionQueue == NULL) {
+        printf("Error al crear la cola\n");
+        return;
+    }
+
+   // Cargar el logger desde NVS
+    // loadLoggerFromNVS(&logger);
+    load_logger_from_nvs();
+
+
+    // Crear la tarea de instrucciones
+    xTaskCreate(&instructionTask, "instructionTask", 2048, NULL, 5, NULL);
+
+
+    // Ejemplo de agregar instrucciones a la cola
+    // Instruction inst1 = {PLAY};
+    // Instruction inst2 = {NEXT};
+    // xQueueSend(instructionQueue, &inst1, portMAX_DELAY);
+    // vTaskDelay(pdMS_TO_TICKS(1000)); // Espera 1 segundo
+    // xQueueSend(instructionQueue, &inst2, portMAX_DELAY);
+
+   // Imprimir el contenido del logger
+    // print_logger(&logger);
 }
